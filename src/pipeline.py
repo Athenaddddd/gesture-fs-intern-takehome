@@ -12,7 +12,21 @@ Useful docs:
   - HuggingFace pipelines: https://python.langchain.com/docs/integrations/llms/huggingface_pipelines/
 """
 
+import argparse
 import os
+
+# 模型缓存统一放在项目目录下（.cache/huggingface），默认从这里读取。
+# 默认强制离线（只读本地缓存、不联网）；如需重新下载，请覆盖为 0 并设置镜像。
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("HF_HOME", os.path.join(_PROJECT_ROOT, ".cache", "huggingface"))
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+# pytest 场景下，测试文件会先于本模块 import transformers，此时 huggingface_hub
+# 的缓存路径常量已被固化为用户默认目录。这里显式重定向到项目目录，保证 CLI 与测试一致。
+import huggingface_hub.constants as _hf_constants
+_hf_constants.HF_HUB_CACHE = os.path.join(_PROJECT_ROOT, ".cache", "huggingface", "hub")
+
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from src.knowledge_base import build_knowledge_base
 
@@ -80,15 +94,45 @@ def ask_question(vector_store, llm, question: str) -> dict:
             "answer"  -> str: the generated answer
             "sources" -> list[str]: the chunk texts that were retrieved
     """
-    # TODO: implement this (~6-8 lines)
-    raise NotImplementedError("TODO 1: Implement ask_question")
+    docs = vector_store.similarity_search(question, k=3)
+    sources = [doc.page_content for doc in docs]
+    context = "\n\n".join(sources)
+
+    formatted_prompt = PROMPT_TEMPLATE.format(
+        context=context,
+        question=question,
+    )
+
+    result = llm(formatted_prompt)
+    answer = result[0]["generated_text"]
+
+    return {"answer": answer, "sources": sources}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TODO 2: Complete the interactive loop
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def main():
-    """Interactive Q&A loop.
+def _print_result(result: dict) -> None:
+    """Print the retrieved sources and generated answer."""
+    print("\n📄 Sources:")
+    for i, source in enumerate(result["sources"], start=1):
+        preview = source.replace("\n", " ").strip()
+        print(f"  {i}. {preview}")
+    print(f"\n💬 Answer: {result['answer']}\n")
+
+
+def _has_documents(data_dir: str) -> bool:
+    """Return True if data_dir contains at least one .txt file."""
+    if not os.path.isdir(data_dir):
+        return False
+    for _, _, filenames in os.walk(data_dir):
+        if any(name.endswith(".txt") for name in filenames):
+            return True
+    return False
+
+
+def main() -> None:
+    """Interactive Q&A loop, or one-shot mode via --query.
 
     Steps:
       1. Build the knowledge base using build_knowledge_base()
@@ -102,8 +146,44 @@ def main():
     """
     data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
 
-    # TODO: implement this (~10-12 lines)
-    raise NotImplementedError("TODO 2: Complete the interactive loop")
+    parser = argparse.ArgumentParser(
+        description="Ask questions about a marketing agency's services, pricing, and process."
+    )
+    parser.add_argument(
+        "--query",
+        type=str,
+        help="Answer a single question and exit (non-interactive mode).",
+    )
+    args = parser.parse_args()
+
+    if not _has_documents(data_dir):
+        print(f"Error: no .txt documents found under {data_dir}.")
+        return
+
+    vector_store = build_knowledge_base(data_dir)
+    llm = get_llm()
+
+    if args.query:
+        _print_result(ask_question(vector_store, llm, args.query))
+        return
+
+    print("Ask a question about our services, pricing, or process.")
+    print("Type 'quit' to exit.\n")
+
+    while True:
+        try:
+            question = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if question.lower() == "quit":
+            break
+
+        if not question:
+            continue
+
+        _print_result(ask_question(vector_store, llm, question))
 
 
 if __name__ == "__main__":
